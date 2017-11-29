@@ -1,9 +1,10 @@
 # video containers
 
-mjpeg/
-mkv/
+- mjpeg/
+- mkv/
 
 # video codecs
-MPEG2 ISO/IEC 13818-2
-MPEG4 
+
+- MPEG2 ISO/IEC 13818-2
+- MPEG4 
 
