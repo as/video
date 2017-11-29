@@ -41,12 +41,20 @@ Scan:
 		e, a, err := NextItem(r)
 		nm := name(e)
 		// uncomment for lots of information
-		// fmt.Printf("%s:#%d,+#%d	%q\n", file, at(r), a, nm)
+		fmt.Printf("%s:#%d,+#%d	%q\n", file, at(r), a, nm)
 		if err != nil {
 			break
 		}
 
 		switch nm {
+		case "Void":
+			for {
+				c, _ := r.ReadByte()
+				if c != 0 {
+					r.UnreadByte()
+					break
+				}
+			}
 		case "SimpleTag", "Tags", "Tag":
 			// nothing, just descend without advancing
 		case "TagName":
@@ -58,7 +66,7 @@ Scan:
 		default:
 			_, err = r.Seek(a, io.SeekCurrent)
 			if err != nil {
-				if err != nil && err != io.EOF {
+				if err != io.EOF {
 					log.Fatalln(err)
 				}
 				break Scan
@@ -98,7 +106,6 @@ func NextItem(r *bytes.Reader) (elem int, advance int64, err error) {
 
 	elem = int(v)
 	elem = elem >> ((4 - uint(advance)) * 8)
-
 	_, advance, v = extract(r)
 	p0 := at(r)
 	p1, err := r.Seek(advance, io.SeekCurrent)
