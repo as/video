@@ -1,4 +1,10 @@
-# video
-MPEG2 ISO/IEC 13818-2
+# video containers
 
-This repository will be empty until patent questions are clarified about some particular codecs.
+- mjpeg/
+- mkv/
+
+# video codecs
+
+- MPEG2 ISO/IEC 13818-2
+- MPEG4 
+
