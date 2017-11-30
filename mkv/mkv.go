@@ -1,60 +1,50 @@
-// usage (before this is seperated into it's own package)
-// go run mkv.go file.mkv
 //
-package main
+package mkv
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"math/bits"
 	"os"
 	"strings"
 )
 
-var file = os.Args[1]
+const maxSpins = 1e10
 
-func main() {
-	data, err := ioutil.ReadFile(file)
-	if err != nil {
-		panic(err)
-	}
+type Config struct {
+	Tags map[string]string
+}
 
+// DecodeConfig decodes the MKV config. Unlike image.DecodeConfig,
+// this one reads the entire MKV (not just the headers). Metadata
+// can reside in the trailer or in arbitrary locations of the file
+func DecodeConfig(r io.Reader) (*Config, error) {
+	var err error
+
+	s := NewScanner(r)
 	tags := make(map[string]string)
-
 	key := ""
-	r := bytes.NewReader(data)
-
 	readstring := func(len int64) string {
-		m := make([]byte, len)
-		r.Read(m)
-		return strings.Trim(string(m), "\x00")
+		str, _ := s.ReadString(int(len))
+		return str
 	}
 
 	// Scan through the MKV, looking for elements we want
 	// including their predecessors.
 Scan:
-	for i := 0; i < 1e7; i++ {
-		e, a, err := NextItem(r)
-		nm := name(e)
-		// uncomment for lots of information
-		fmt.Printf("%s:#%d,+#%d	%q\n", file, at(r), a, nm)
+	for i := 0; i < maxSpins; i++ {
+		e, a, err := s.Next()
 		if err != nil {
 			break
 		}
-
+		nm := name(e)
 		switch nm {
 		case "Void":
-			for {
-				c, _ := r.ReadByte()
-				if c != 0 {
-					r.UnreadByte()
-					break
-				}
-			}
+			s.ParseVoid()
 		case "SimpleTag", "Tags", "Tag":
 			// nothing, just descend without advancing
 		case "TagName":
@@ -64,59 +54,107 @@ Scan:
 		case "CodecID":
 			tags["CodecID"] = readstring(a)
 		default:
-			_, err = r.Seek(a, io.SeekCurrent)
-			if err != nil {
-				if err != io.EOF {
-					log.Fatalln(err)
-				}
+			if err = s.Advance(a); err != nil {
 				break Scan
 			}
 		}
 	}
-	for k, v := range tags {
+	return &Config{Tags: tags}, err
+}
+
+func main() {
+	br := bufio.NewReader(os.Stdin)
+	conf, err := DecodeConfig(br)
+	if err != nil {
+		log.Printf("decode: %s\n", err)
+	}
+	for k, v := range conf.Tags {
 		fmt.Printf("%q=%q\n", k, v)
 	}
 }
 
-func extract(r *bytes.Reader) (nz int, advance int64, v uint32) {
-	err := binary.Read(r, binary.BigEndian, &v)
+// NewScanner
+func NewScanner(r io.Reader) *Scanner {
+	switch r := r.(type) {
+	case *bufio.Reader:
+		return &Scanner{r: r}
+	}
+	return &Scanner{r: bufio.NewReader(r)}
+}
+
+type Scanner struct {
+	r       *bufio.Reader
+	elem    int
+	advance int64
+	err     error
+}
+
+func (s *Scanner) extract() (nz int, advance int64, v uint32) {
+	p, _ := s.r.Peek(4)
+	err := binary.Read(bytes.NewReader(p), binary.BigEndian, &v)
 	if err != nil {
 		return -1, -1, 0
 	}
 	nz = int(bits.LeadingZeros32(v))
-	r.Seek(-4, io.SeekCurrent)
 	advance = int64(nz + 1)
 	return int(nz), advance, v
 }
-
-func at(r *bytes.Reader) int64 {
-	n, _ := r.Seek(0, io.SeekCurrent)
-	return int64(n)
+func (s *Scanner) ReadString(n int) (string, error) {
+	m := make([]byte, n)
+	_, err := io.ReadAtLeast(s.r, m, n)
+	return strings.Trim(string(m), "\x00"), err
+}
+func (s *Scanner) ReadByte() (byte, error) {
+	return s.r.ReadByte()
+}
+func (s *Scanner) UnreadByte() error {
+	return s.r.UnreadByte()
 }
 
-func NextItem(r *bytes.Reader) (elem int, advance int64, err error) {
-	_, advance, v := extract(r)
+func (s *Scanner) ParseVoid() {
+	if name(s.elem) != "Void" {
+		return
+	}
+	for {
+		c, _ := s.ReadByte()
+		if c != 0 {
+			s.UnreadByte()
+			break
+		}
+	}
+}
+
+func (s *Scanner) Advance(n int64) (err error) {
+	for i := int64(0); i < n; i++ {
+		_, err = s.r.ReadByte()
+		if err != nil {
+			break
+		}
+	}
+	return err
+}
+func (s *Scanner) Next() (elem int, advance int64, err error) {
+	_, advance, v := s.extract()
 	if advance == -1 {
 		return 0, 0, io.EOF
 	}
-	_, err = r.Seek(advance, io.SeekCurrent)
-	if err != nil {
+	if err = s.Advance(advance); err != nil {
 		return 0, 0, err
 	}
 
 	elem = int(v)
 	elem = elem >> ((4 - uint(advance)) * 8)
-	_, advance, v = extract(r)
-	p0 := at(r)
-	p1, err := r.Seek(advance, io.SeekCurrent)
+	_, advance, v = s.extract()
+	err = s.Advance(advance)
 	L := uint(advance)
 	v = v << L >> L
 	v >>= (4 - L) * 8
+	s.elem, s.advance, s.err = elem, int64(v), err
+	return s.elem, s.advance, s.err
+}
 
-	if p0 == p1 {
-		err = io.EOF
-	}
-	return elem, int64(v), err
+func at(r *bufio.Reader) int64 {
+	return int64(2)
 }
 
 func name(e int) string {

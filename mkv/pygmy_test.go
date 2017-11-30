@@ -1,16 +1,14 @@
-package main
+package mkv
 
 import (
 	"bytes"
-	"io"
 	"testing"
 )
 
 func TestPygmy(t *testing.T) {
-	file = "pygmy.mkv"
-	r := bytes.NewReader([]byte(mkv))
+	s := NewScanner(bytes.NewReader([]byte(mkv)))
 	for i := 0; ; i++ {
-		e, a, err := NextItem(r)
+		e, a, err := s.Next()
 		if have, want := name(e), pygtab[i].name; have != want {
 			t.Logf("element: have: %q want: %q", have, want)
 			t.Fail()
@@ -23,15 +21,9 @@ func TestPygmy(t *testing.T) {
 			return
 		}
 		if name(e) == "Void" {
-			for {
-				c, _ := r.ReadByte()
-				if c != 0 {
-					r.UnreadByte()
-					break
-				}
-			}
+			s.ParseVoid()
 		} else {
-			r.Seek(a, io.SeekCurrent)
+			s.Advance(a)
 		}
 	}
 }

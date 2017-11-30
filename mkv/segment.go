@@ -1,4 +1,4 @@
-package main
+package mkv
 
 type Segment struct {
 	ChapterTranslateCodec      string
