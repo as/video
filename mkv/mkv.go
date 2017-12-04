@@ -9,7 +9,6 @@ import (
 	"io"
 	"log"
 	"math/bits"
-	"os"
 	"strings"
 )
 
@@ -32,6 +31,7 @@ func DecodeConfig(r io.Reader) (*Config, error) {
 		str, _ := s.ReadString(int(len))
 		return str
 	}
+	var dx,dy uint16
 
 	// Scan through the MKV, looking for elements we want
 	// including their predecessors.
@@ -41,8 +41,15 @@ Scan:
 		if err != nil {
 			break
 		}
-		nm := name(e)
+		nm := Name(e)
+		log.Println(nm)
 		switch nm {
+		case "PixelWidth":
+			binary.Read(s, binary.BigEndian, &dx)
+			log.Printf("width: %d\n", dx)
+		case "PixelHeight":
+			binary.Read(s, binary.BigEndian, &dy)
+			log.Printf("height: %d\n", dy)
 		case "Void":
 			s.ParseVoid()
 		case "SimpleTag", "Tags", "Tag":
@@ -60,17 +67,6 @@ Scan:
 		}
 	}
 	return &Config{Tags: tags}, err
-}
-
-func main() {
-	br := bufio.NewReader(os.Stdin)
-	conf, err := DecodeConfig(br)
-	if err != nil {
-		log.Printf("decode: %s\n", err)
-	}
-	for k, v := range conf.Tags {
-		fmt.Printf("%q=%q\n", k, v)
-	}
 }
 
 // NewScanner
@@ -99,6 +95,9 @@ func (s *Scanner) extract() (nz int, advance int64, v uint32) {
 	advance = int64(nz + 1)
 	return int(nz), advance, v
 }
+func (s *Scanner) Read(p []byte) (n int, err error){
+	return s.r.Read(p)
+}
 func (s *Scanner) ReadString(n int) (string, error) {
 	m := make([]byte, n)
 	_, err := io.ReadAtLeast(s.r, m, n)
@@ -112,7 +111,7 @@ func (s *Scanner) UnreadByte() error {
 }
 
 func (s *Scanner) ParseVoid() {
-	if name(s.elem) != "Void" {
+	if Name(s.elem) != "Void" {
 		return
 	}
 	for {
@@ -157,7 +156,7 @@ func at(r *bufio.Reader) int64 {
 	return int64(2)
 }
 
-func name(e int) string {
+func Name(e int) string {
 	s, ok := ElementName[e]
 	if !ok {
 		return fmt.Sprintf("%x", e)
