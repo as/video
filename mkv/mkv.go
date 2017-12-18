@@ -4,18 +4,37 @@ package mkv
 import (
 	"bufio"
 	"bytes"
+	"encoding"
 	"encoding/binary"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"math/bits"
 	"strings"
+	"time"
 )
 
 const maxSpins = 1e10
 
+type Decoder interface {
+	Decode(r io.Reader) error
+}
+
 type Config struct {
-	Tags map[string]string
+	Title         string
+	Width, Height int
+	//	ColorModel    color.Model	// This will not be straightforward
+	FourCC   string
+	Tags     map[string]string
+	Duration time.Duration
+	Codec    []*CodecInfo
+	Muxer    string
+	Writer   string
+}
+
+func (c CodecInfo) String() string {
+	return fmt.Sprintf("%#v\n", c)
 }
 
 // DecodeConfig decodes the MKV config. Unlike image.DecodeConfig,
@@ -31,8 +50,16 @@ func DecodeConfig(r io.Reader) (*Config, error) {
 		str, _ := s.ReadString(int(len))
 		return str
 	}
-	var dx,dy uint16
-
+	var (
+		dx, dy               int64
+		tcs                  int64
+		dur                  float64
+		fcc                  = make([]byte, 4)
+		muxer, writer, title string
+		codec                CodecInfo
+		codecs               []*CodecInfo
+		ncodecs              int
+	)
 	// Scan through the MKV, looking for elements we want
 	// including their predecessors.
 Scan:
@@ -42,14 +69,39 @@ Scan:
 			break
 		}
 		nm := Name(e)
-		log.Println(nm)
+		log.Println(nm, a)
 		switch nm {
 		case "PixelWidth":
-			binary.Read(s, binary.BigEndian, &dx)
-			log.Printf("width: %d\n", dx)
+			s.Decode(&dx)
 		case "PixelHeight":
-			binary.Read(s, binary.BigEndian, &dy)
-			log.Printf("height: %d\n", dy)
+			s.Decode(&dy)
+		case "CodecID":
+			if ncodecs > len(codecs) {
+				codecs = append(codecs, &codec)
+			}
+			id := readstring(a)
+			codec = codectab[id]
+			ncodecs++
+		case "CodecName":
+			codec.Name = readstring(a)
+		case "CodecInfoURL":
+			codec.URL = readstring(a)
+		case "CodecDownloadURL":
+			codec.Download = readstring(a)
+		case "CodecSettings":
+			codec.Settings = readstring(a)
+		case "Muxer":
+			muxer = readstring(a)
+		case "Writer":
+			writer = readstring(a)
+		case "Title":
+			title = readstring(a)
+		case "ColourModel":
+			s.Decode(fcc)
+		case "TimecodeScale":
+			s.Decode(&tcs)
+		case "Duration":
+			s.Decode(&dur)
 		case "Void":
 			s.ParseVoid()
 		case "SimpleTag", "Tags", "Tag":
@@ -58,15 +110,28 @@ Scan:
 			key = readstring(a)
 		case "TagString":
 			tags[key] = readstring(a)
-		case "CodecID":
-			tags["CodecID"] = readstring(a)
 		default:
 			if err = s.Advance(a); err != nil {
 				break Scan
 			}
 		}
 	}
-	return &Config{Tags: tags}, err
+
+	if ncodecs > len(codecs) {
+		codecs = append(codecs, &codec)
+	}
+	log.Printf("dur %v tcs %v\n", dur, tcs)
+	return &Config{
+		Tags:     tags,
+		Muxer:    muxer,
+		Writer:   writer,
+		Title:    title,
+		FourCC:   string(fcc),
+		Width:    int(dx),
+		Height:   int(dy),
+		Duration: time.Duration(float64(dur) * float64(tcs)),
+		Codec:    codecs,
+	}, err
 }
 
 // NewScanner
@@ -85,6 +150,63 @@ type Scanner struct {
 	err     error
 }
 
+// Decode decodes the next element under the scanner's current offset.
+// If v implements the Decoder or encoding.BinaryUnmarshaler interface,
+// it uses those corresponding method sets to complete the decoding.
+// Decode ensures the scanner always advances the correct number of
+// bytes in the underlying stream, regardless of the behavior of v.
+//
+// TODO(as): document the encoding of integers
+func (s *Scanner) Decode(v interface{}) (err error) {
+	l := &io.LimitedReader{
+		N: s.advance,
+		R: s.r,
+	}
+	switch v := v.(type) {
+	case Decoder:
+		err = v.Decode(l)
+	case encoding.BinaryUnmarshaler:
+		b, _ := ioutil.ReadAll(l)
+		err = v.UnmarshalBinary(b)
+	case *float32, *float64:
+		if l.N == 3 {
+			l.N = 4
+		}
+		err = binary.Read(l, binary.BigEndian, v)
+	case *int64:
+		switch s.advance {
+		case 1:
+			var b byte
+			err = binary.Read(l, binary.BigEndian, &b)
+			*v = int64(b)
+		case 2:
+			var b uint16
+			err = binary.Read(l, binary.BigEndian, &b)
+			*v = int64(b)
+		case 3:
+			data, _ := ioutil.ReadAll(l)
+			var b uint32
+			if s.advance == 3 {
+				data = append([]byte{0}, data...)
+			}
+			err = binary.Read(bytes.NewReader(data), binary.BigEndian, &b)
+			*v = int64(b)
+		case 4:
+			var b uint32
+			err = binary.Read(l, binary.BigEndian, &b)
+			*v = int64(b)
+		}
+	case []byte:
+		_, err = io.ReadAtLeast(l, v, len(v))
+	}
+	if l.N > 0 {
+		// Ensure that the parser is always element-aligned by advancing
+		// through the slop the decoder functions missed
+		ioutil.ReadAll(l)
+	}
+	return err
+}
+
 func (s *Scanner) extract() (nz int, advance int64, v uint32) {
 	p, _ := s.r.Peek(4)
 	err := binary.Read(bytes.NewReader(p), binary.BigEndian, &v)
@@ -95,7 +217,7 @@ func (s *Scanner) extract() (nz int, advance int64, v uint32) {
 	advance = int64(nz + 1)
 	return int(nz), advance, v
 }
-func (s *Scanner) Read(p []byte) (n int, err error){
+func (s *Scanner) Read(p []byte) (n int, err error) {
 	return s.r.Read(p)
 }
 func (s *Scanner) ReadString(n int) (string, error) {
@@ -154,265 +276,4 @@ func (s *Scanner) Next() (elem int, advance int64, err error) {
 
 func at(r *bufio.Reader) int64 {
 	return int64(2)
-}
-
-func Name(e int) string {
-	s, ok := ElementName[e]
-	if !ok {
-		return fmt.Sprintf("%x", e)
-	}
-	return s
-}
-
-var ElementName = map[int]string{
-	0xBF:       "CRC-32",
-	0x1A45DFA3: "EBML",
-	0x4286:     "EBMLVersion",
-	0x42F7:     "EBMLReadVersion",
-	0x42F2:     "EBMLMaxIDLength",
-	0x42F3:     "EBMLMaxSizeLength",
-	0x4282:     "DocType",
-	0x4287:     "DocTypeVersion",
-	0x4285:     "DocTypeReadVersion",
-	0xEC:       "Void",
-	0x4DBB:     "Seek",
-	0x53AB:     "SeekID",
-	0x53AC:     "SeekPosition",
-	0x18538067: "Segment",
-	0x6532:     "SignedElement",
-	0x7384:     "SegmentFilename",
-	0x4444:     "SegmentFamily",
-	0x6924:     "ChapterTranslate",
-	0x5854:     "SilentTracks",
-	0x7446:     "AttachmentLink",
-	0x114D9B74: "SeekHead",
-	0x6624:     "TrackTranslate",
-	0x6240:     "ContentEncoding",
-	0x5031:     "ContentEncodingOrder",
-	0x5032:     "ContentEncodingScope",
-	0x5033:     "ContentEncodingType",
-	0x5034:     "ContentCompression",
-	0x4254:     "ContentCompAlgo",
-	0x4255:     "ContentCompSettings",
-	0x5035:     "ContentEncryption",
-	0x96:       "CueRefTime",
-	0x97:       "CueRefCluster",
-	0x4660:     "FileMimeType",
-	0x4675:     "FileReferral",
-	0x4661:     "FileUsedStartTime",
-	0x4662:     "FileUsedEndTime",
-	0x45DD:     "EditionFlagOrdered",
-	0x92:       "ChapterTimeEnd",
-	0x98:       "ChapterFlagHidden",
-	0x4598:     "ChapterFlagEnabled",
-	0x6E67:     "ChapterSegmentUID",
-	0x6EBC:     "ChapterSegmentEditionUID",
-	0x63C3:     "ChapterPhysicalEquiv",
-	0x8F:       "ChapterTrack",
-	0x89:       "ChapterTrackNumber",
-	0x437E:     "ChapCountry",
-	0x6944:     "ChapProcess",
-	0x450D:     "ChapProcessPrivate",
-	0x6911:     "ChapProcessCommand",
-	0x6922:     "ChapProcessTime",
-	0x6933:     "ChapProcessData",
-	0x1254C367: "Tags",
-	0x7373:     "Tag",
-	0x63C0:     "Targets",
-	0x68CA:     "TargetTypeValue",
-	0x63CA:     "TargetType",
-	0x63C5:     "TagTrackUID",
-	0x63C9:     "TagEditionUID",
-	0x63C4:     "TagChapterUID",
-	0x63C6:     "TagAttachmentUID",
-	0x67C8:     "SimpleTag",
-	0x45A3:     "TagName",
-	0x447A:     "TagLanguage",
-	0x4484:     "TagDefault",
-	0x4487:     "TagString",
-	0x1B538667: "SignatureSlot",
-	0x7E8A:     "SignatureAlgo",
-	0x7E9A:     "SignatureHash",
-	0x7EA5:     "SignaturePublicKey",
-	0x7EB5:     "Signature",
-	0x7E5B:     "SignatureElements",
-	0x7E7B:     "SignatureElementList",
-	0x1549A966: "Info",
-	0x73A4:     "SegmentUID",
-	0x3CB923:   "PrevUID",
-	0x3C83AB:   "PrevFilename",
-	0x3EB923:   "NextUID",
-	0x3E83BB:   "NextFilename",
-	0x69FC:     "ChapterTranslateEditionUID",
-	0x69BF:     "ChapterTranslateCodec",
-	0x69A5:     "ChapterTranslateID",
-	0x2AD7B1:   "TimecodeScale",
-	0x4489:     "Duration",
-	0x4461:     "DateUTC",
-	0x7BA9:     "Title",
-	0x4D80:     "MuxingApp",
-	0x5741:     "WritingApp",
-	0x1F43B675: "Cluster",
-	0xE7:       "Timecode",
-	0x58D7:     "SilentTrackNumber",
-	0xA7:       "Position",
-	0xAB:       "PrevSize",
-	0xA3:       "SimpleBlock",
-	0xA0:       "BlockGroup",
-	0xA1:       "Block",
-	0xA2:       "BlockVirtual",
-	0x75A1:     "BlockAdditions",
-	0xA6:       "BlockMore",
-	0xEE:       "BlockAddID",
-	0xA5:       "BlockAdditional",
-	0x9B:       "BlockDuration",
-	0xFA:       "ReferencePriority",
-	0xFB:       "ReferenceBlock",
-	0xFD:       "ReferenceVirtual",
-	0xA4:       "CodecState",
-	0x75A2:     "DiscardPadding",
-	0x8E:       "Slices",
-	0xE8:       "TimeSlice",
-	0xCC:       "LaceNumber",
-	0xCD:       "FrameNumber",
-	0xCB:       "BlockAdditionID",
-	0xCE:       "Delay",
-	0xCF:       "SliceDuration",
-	0xC8:       "ReferenceFrame",
-	0xC9:       "ReferenceOffset",
-	0xCA:       "ReferenceTimeCode",
-	0xAF:       "EncryptedBlock",
-	0x1654AE6B: "Tracks",
-	0xAE:       "TrackEntry",
-	0xD7:       "TrackNumber",
-	0x73C5:     "TrackUID",
-	0x83:       "TrackType",
-	0xB9:       "FlagEnabled",
-	0x88:       "FlagDefault",
-	0x55AA:     "FlagForced",
-	0x9C:       "FlagLacing",
-	0x6DE7:     "MinCache",
-	0x6DF8:     "MaxCache",
-	0x23E383:   "DefaultDuration",
-	0x234E7A:   "DefaultDecodedFieldDuration",
-	0x23314F:   "TrackTimecodeScale",
-	0x537F:     "TrackOffset",
-	0x55EE:     "MaxBlockAdditionID",
-	0x536E:     "Name",
-	0x22B59C:   "Language",
-	0x86:       "CodecID",
-	0x63A2:     "CodecPrivate",
-	0x258688:   "CodecName",
-	0x3A9697:   "CodecSettings",
-	0x3B4040:   "CodecInfoURL",
-	0x26B240:   "CodecDownloadURL",
-	0xAA:       "CodecDecodeAll",
-	0x6FAB:     "TrackOverlay",
-	0x56AA:     "CodecDelay",
-	0x56BB:     "SeekPreRoll",
-	0x66FC:     "TrackTranslateEditionUID",
-	0x66BF:     "TrackTranslateCodec",
-	0x66A5:     "TrackTranslateTrackID",
-	0xE0:       "Video",
-	0x9A:       "FlagInterlaced",
-	0x9D:       "FieldOrder",
-	0x53B8:     "StereoMode",
-	0x53C0:     "AlphaMode",
-	0x53B9:     "OldStereoMode",
-	0xB0:       "PixelWidth",
-	0xBA:       "PixelHeight",
-	0x54AA:     "PixelCropBottom",
-	0x54BB:     "PixelCropTop",
-	0x54CC:     "PixelCropLeft",
-	0x54DD:     "PixelCropRight",
-	0x54B0:     "DisplayWidth",
-	0x54BA:     "DisplayHeight",
-	0x54B2:     "DisplayUnit",
-	0x54B3:     "AspectRatioType",
-	0x2EB524:   "ColourSpace",
-	0x2FB523:   "GammaValue",
-	0x2383E3:   "FrameRate",
-	0x55B0:     "Colour",
-	0x55B1:     "MatrixCoefficients",
-	0x55B2:     "BitsPerChannel",
-	0x55B3:     "ChromaSubsamplingHorz",
-	0x55B4:     "ChromaSubsamplingVert",
-	0x55B5:     "CbSubsamplingHorz",
-	0x55B6:     "CbSubsamplingVert",
-	0x55B7:     "ChromaSitingHorz",
-	0x55B8:     "ChromaSitingVert",
-	0x55B9:     "Range",
-	0x55BA:     "TransferCharacteristics",
-	0x55BB:     "Primaries",
-	0x55BC:     "MaxCLL",
-	0x55BD:     "MaxFALL",
-	0x55D0:     "MasteringMetadata",
-	0x55D1:     "PrimaryRChromaticityX",
-	0x55D2:     "PrimaryRChromaticityY",
-	0x55D3:     "PrimaryGChromaticityX",
-	0x55D4:     "PrimaryGChromaticityY",
-	0x55D5:     "PrimaryBChromaticityX",
-	0x55D6:     "PrimaryBChromaticityY",
-	0x55D7:     "WhitePointChromaticityX",
-	0x55D8:     "WhitePointChromaticityY",
-	0x55D9:     "LuminanceMax",
-	0x55DA:     "LuminanceMin",
-	0xE1:       "Audio",
-	0xB5:       "SamplingFrequency",
-	0x78B5:     "OutputSamplingFrequency",
-	0x9F:       "Channels",
-	0x7D7B:     "ChannelPositions",
-	0x6264:     "BitDepth",
-	0xE2:       "TrackOperation",
-	0xE3:       "TrackCombinePlanes",
-	0xE4:       "TrackPlane",
-	0xE5:       "TrackPlaneUID",
-	0xE6:       "TrackPlaneType",
-	0xE9:       "TrackJoinBlocks",
-	0xED:       "TrackJoinUID",
-	0xC0:       "TrickTrackUID",
-	0xC1:       "TrickTrackSegmentUID",
-	0xC6:       "TrickTrackFlag",
-	0xC7:       "TrickMasterTrackUID",
-	0xC4:       "TrickMasterTrackSegmentUID",
-	0x6D80:     "ContentEncodings",
-	0x47E1:     "ContentEncAlgo",
-	0x47E2:     "ContentEncKeyID",
-	0x47E3:     "ContentSignature",
-	0x47E4:     "ContentSigKeyID",
-	0x47E5:     "ContentSigAlgo",
-	0x47E6:     "ContentSigHashAlgo",
-	0x1C53BB6B: "Cues",
-	0xBB:       "CuePoint",
-	0xB3:       "CueTime",
-	0xB7:       "CueTrackPositions",
-	0xF7:       "CueTrack",
-	0xF1:       "CueClusterPosition",
-	0xF0:       "CueRelativePosition",
-	0xB2:       "CueDuration",
-	0x5378:     "CueBlockNumber",
-	0xEA:       "CueCodecState",
-	0xDB:       "CueReference",
-	0x535F:     "CueRefNumber",
-	0xEB:       "CueRefCodecState",
-	0x1941A469: "Attachments",
-	0x61A7:     "AttachedFile",
-	0x467E:     "FileDescription",
-	0x466E:     "FileName",
-	0x465C:     "FileData",
-	0x46AE:     "FileUID",
-	0x1043A770: "Chapters",
-	0x45B9:     "EditionEntry",
-	0x45BC:     "EditionUID",
-	0x45BD:     "EditionFlagHidden",
-	0x45DB:     "EditionFlagDefault",
-	0xB6:       "ChapterAtom",
-	0x73C4:     "ChapterUID",
-	0x5654:     "ChapterStringUID",
-	0x91:       "ChapterTimeStart",
-	0x80:       "ChapterDisplay",
-	0x85:       "ChapString",
-	0x437C:     "ChapLanguage",
-	0x6955:     "ChapProcessCodecID",
-	0x4485:     "TagBinary",
 }

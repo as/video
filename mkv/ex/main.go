@@ -17,6 +17,8 @@ func main() {
 	if err != nil {
 		log.Printf("decode: %s\n", err)
 	}
+	fmt.Printf("config: %+v\n", conf)
+
 	for k, v := range conf.Tags {
 		fmt.Printf("%q=%q\n", k, v)
 	}
