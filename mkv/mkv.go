@@ -15,6 +15,8 @@ import (
 	"time"
 )
 
+type Vint int64
+
 const maxSpins = 1e10
 
 type Decoder interface {
@@ -31,6 +33,7 @@ type Config struct {
 	Codec    []*CodecInfo
 	Muxer    string
 	Writer   string
+	Block    []Block // the blocks, in coding order and absolute timestamps
 }
 
 func (c CodecInfo) String() string {
@@ -60,6 +63,10 @@ func DecodeConfig(r io.Reader) (*Config, error) {
 		codecs               []*CodecInfo
 		ncodecs              int
 	)
+
+	var (
+		clusterTC int64
+	)
 	// Scan through the MKV, looking for elements we want
 	// including their predecessors.
 Scan:
@@ -82,6 +89,15 @@ Scan:
 			id := readstring(a)
 			codec = codectab[id]
 			ncodecs++
+		case "SimpleBlock":
+			b := &Block{}
+			s.Decode(b)
+			b.TimeCode *= time.Duration(tcs)
+			b.TimeCode += time.Duration(clusterTC)
+			log.Printf("Block: %+v\n", b)
+			//
+			// You could, in theory, send this value through a channel
+			// to excise a very specific piece of the mkv
 		case "CodecName":
 			codec.Name = readstring(a)
 		case "CodecInfoURL":
@@ -98,6 +114,10 @@ Scan:
 			title = readstring(a)
 		case "ColourModel":
 			s.Decode(fcc)
+		case "Timecode":
+			s.Decode(&clusterTC)
+			clusterTC = int64(float64(clusterTC) * float64(tcs))
+			//			log.Printf("cluster timecode is %s\n", clusterTC)
 		case "TimecodeScale":
 			s.Decode(&tcs)
 		case "Duration":
@@ -173,6 +193,30 @@ func (s *Scanner) Decode(v interface{}) (err error) {
 			l.N = 4
 		}
 		err = binary.Read(l, binary.BigEndian, v)
+	case *Vint:
+		_, adv, va := extract(bufio.NewReader(l))
+		L := uint(adv)
+		va = va << L >> L
+		va >>= (4 - L) * 8
+		*v = Vint(va)
+		l.Read(make([]byte, adv))
+	case *Block:
+		l := bufio.NewReader(l)
+		_, adv, va := extract(l)
+		L := uint(adv)
+		va = va << L >> L
+		va >>= (4 - L) * 8
+		track := Vint(va)
+		l.Discard(int(adv))
+		tc := new(int16)
+		binary.Read(l, binary.BigEndian, tc)
+		b := new(byte) // what was wrong with the old one
+		binary.Read(l, binary.BigEndian, b)
+		*v = Block{
+			Track:    track,
+			TimeCode: time.Duration(*tc), // not pre-multiplied
+			Flag:     Flag(*b),
+		}
 	case *int64:
 		switch s.advance {
 		case 1:
@@ -207,8 +251,12 @@ func (s *Scanner) Decode(v interface{}) (err error) {
 	return err
 }
 
-func (s *Scanner) extract() (nz int, advance int64, v uint32) {
-	p, _ := s.r.Peek(4)
+type peeker interface {
+	Peek(int) ([]byte, error)
+}
+
+func extract(r peeker) (nz int, advance int64, v uint32) {
+	p, _ := r.Peek(4)
 	err := binary.Read(bytes.NewReader(p), binary.BigEndian, &v)
 	if err != nil {
 		return -1, -1, 0
@@ -216,6 +264,10 @@ func (s *Scanner) extract() (nz int, advance int64, v uint32) {
 	nz = int(bits.LeadingZeros32(v))
 	advance = int64(nz + 1)
 	return int(nz), advance, v
+}
+
+func (s *Scanner) extract() (nz int, advance int64, v uint32) {
+	return extract(s.r)
 }
 func (s *Scanner) Read(p []byte) (n int, err error) {
 	return s.r.Read(p)

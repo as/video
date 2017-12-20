@@ -9,7 +9,7 @@ func TestPygmy(t *testing.T) {
 	s := NewScanner(bytes.NewReader([]byte(mkv)))
 	for i := 0; ; i++ {
 		e, a, err := s.Next()
-		if have, want := name(e), pygtab[i].name; have != want {
+		if have, want := Name(e), pygtab[i].name; have != want {
 			t.Logf("element: have: %q want: %q", have, want)
 			t.Fail()
 		}
@@ -20,7 +20,7 @@ func TestPygmy(t *testing.T) {
 		if err != nil {
 			return
 		}
-		if name(e) == "Void" {
+		if Name(e) == "Void" {
 			s.ParseVoid()
 		} else {
 			s.Advance(a)
