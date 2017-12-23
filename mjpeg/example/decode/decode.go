@@ -15,7 +15,7 @@ func main() {
 	sc := mjpg.Open(fd)
 	for sc.Scan() {
 		img, _, err := sc.Frame().Decode()
-		if err != nil{
+		if err != nil {
 			log.Fatalln(err)
 		}
 		png.Encode(os.Stdout, img)
@@ -24,8 +24,8 @@ func main() {
 		log.Fatalln(sc.Err())
 	}
 }
-func no(err error){
-	if err !=nil{
+func no(err error) {
+	if err != nil {
 		log.Fatalln(err)
 	}
 }

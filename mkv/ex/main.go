@@ -4,7 +4,8 @@ package main
 
 import (
 	"bufio"
-	"fmt"
+	"bytes"
+	"io"
 	"log"
 	"os"
 
@@ -12,14 +13,24 @@ import (
 )
 
 func main() {
-	br := bufio.NewReader(os.Stdin)
+	video := new(bytes.Buffer)
+	r := io.TeeReader(os.Stdin, video)
+	br := bufio.NewReader(r)
 	conf, err := mkv.DecodeConfig(br)
 	if err != nil {
 		log.Printf("decode: %s\n", err)
 	}
-	fmt.Printf("config: %+v\n", conf)
+	log.Printf("config: %+v\n", conf)
 
 	for k, v := range conf.Tags {
-		fmt.Printf("%q=%q\n", k, v)
+		log.Printf("%q=%q\n", k, v)
 	}
+	io.Copy(os.Stdout, &io.LimitedReader{
+		video,
+		int64(video.Len() - br.Buffered()),
+		// Substract the length of the video from
+		// what is buffered in the reader. These are
+		// data that haven't been sent to the decoder
+		// but read out of the response.
+	})
 }

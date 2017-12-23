@@ -8,6 +8,8 @@ type CodecInfo struct {
 	URL         string
 	Download    string
 	Settings    string
+	Private     string
+	AAC         AACPrivate
 }
 
 func init() {

@@ -19,8 +19,8 @@ func main() {
 		log.Fatalln(sc.Err())
 	}
 }
-func no(err error){
-	if err !=nil{
+func no(err error) {
+	if err != nil {
 		log.Fatalln(err)
 	}
 }

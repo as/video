@@ -86,8 +86,7 @@ Scan:
 			if ncodecs > len(codecs) {
 				codecs = append(codecs, &codec)
 			}
-			id := readstring(a)
-			codec = codectab[id]
+			codec.ID = readstring(a)
 			ncodecs++
 		case "SimpleBlock":
 			b := &Block{}
@@ -95,9 +94,15 @@ Scan:
 			b.TimeCode *= time.Duration(tcs)
 			b.TimeCode += time.Duration(clusterTC)
 			log.Printf("Block: %+v\n", b)
+			if b.TimeCode > time.Second*5 {
+				break Scan
+			}
 			//
 			// You could, in theory, send this value through a channel
 			// to excise a very specific piece of the mkv
+		case "CodecPrivate":
+			codec.Private = readstring(a)
+			(&codec.AAC).MarshalBinary([]byte(codec.Private))
 		case "CodecName":
 			codec.Name = readstring(a)
 		case "CodecInfoURL":
@@ -217,6 +222,15 @@ func (s *Scanner) Decode(v interface{}) (err error) {
 			TimeCode: time.Duration(*tc), // not pre-multiplied
 			Flag:     Flag(*b),
 		}
+		data, _ := ioutil.ReadAll(l)
+		br := bufio.NewReader(bytes.NewReader(data))
+		x := &X{br}
+		err := x.Next()
+		if err != nil {
+			log.Println(err)
+		}
+		log.Println("block data")
+		log.Printf("%x\n", data)
 	case *int64:
 		switch s.advance {
 		case 1:
@@ -261,13 +275,21 @@ func extract(r peeker) (nz int, advance int64, v uint32) {
 	if err != nil {
 		return -1, -1, 0
 	}
+	log.Printf("the thing: %x\n", v)
 	nz = int(bits.LeadingZeros32(v))
 	advance = int64(nz + 1)
 	return int(nz), advance, v
 }
 
 func (s *Scanner) extract() (nz int, advance int64, v uint32) {
-	return extract(s.r)
+	p, _ := s.r.Peek(4)
+	err := binary.Read(bytes.NewReader(p), binary.BigEndian, &v)
+	if err != nil {
+		return -1, -1, 0
+	}
+	nz = int(bits.LeadingZeros32(v))
+	advance = int64(nz + 1)
+	return int(nz), advance, v
 }
 func (s *Scanner) Read(p []byte) (n int, err error) {
 	return s.r.Read(p)
