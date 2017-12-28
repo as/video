@@ -103,6 +103,7 @@ Scan:
 		case "CodecPrivate":
 			codec.Private = readstring(a)
 			(&codec.AAC).MarshalBinary([]byte(codec.Private))
+			log.Printf("codec private data: %#v\n", codec)
 		case "CodecName":
 			codec.Name = readstring(a)
 		case "CodecInfoURL":
@@ -207,30 +208,29 @@ func (s *Scanner) Decode(v interface{}) (err error) {
 		l.Read(make([]byte, adv))
 	case *Block:
 		l := bufio.NewReader(l)
-		_, adv, va := extract(l)
-		L := uint(adv)
-		va = va << L >> L
-		va >>= (4 - L) * 8
-		track := Vint(va)
-		l.Discard(int(adv))
-		tc := new(int16)
-		binary.Read(l, binary.BigEndian, tc)
-		b := new(byte) // what was wrong with the old one
-		binary.Read(l, binary.BigEndian, b)
-		*v = Block{
-			Track:    track,
-			TimeCode: time.Duration(*tc), // not pre-multiplied
-			Flag:     Flag(*b),
-		}
-		data, _ := ioutil.ReadAll(l)
-		br := bufio.NewReader(bytes.NewReader(data))
-		x := &X{br}
-		err := x.Next()
-		if err != nil {
-			log.Println(err)
-		}
-		log.Println("block data")
-		log.Printf("%x\n", data)
+		ReadBlock(l)
+		/*
+			break
+			_, adv, va := extract(l)
+			L := uint(adv)
+			va = va << L >> L
+			va >>= (4 - L) * 8
+			track := Vint(va)
+			l.Discard(int(adv))
+			tc := new(int16)
+			binary.Read(l, binary.BigEndian, tc)
+			b := new(byte) // what was wrong with the old one
+			binary.Read(l, binary.BigEndian, b)
+			*v = Block{
+				Track:    track,
+				TimeCode: time.Duration(*tc), // not pre-multiplied
+				Flag:     Flag(*b),
+			}
+			data, _ := ioutil.ReadAll(l)
+			br := bufio.NewReader(bytes.NewReader(data))
+			log.Printf("block so far: %+v\n", v)
+			ReadNAL(4, br)
+		*/
 	case *int64:
 		switch s.advance {
 		case 1:
